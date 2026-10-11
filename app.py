@@ -1,10 +1,12 @@
 import os
 import time
 import logging
+import io
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 from google import genai
 from google.genai import types
+from gtts import gTTS
 
 app = Flask(__name__)
 
@@ -30,7 +32,7 @@ client = genai.Client(api_key=API_KEY) if API_KEY else None
 def home():
     return jsonify({
         "status": "online",
-        "server": "ESP32 AI Robot",
+        "server": "ESP32 AI Robot with Audio",
         "ai": "Gemini",
         "model": MODEL
     })
@@ -51,7 +53,7 @@ def analyze_image(image_bytes):
     prompt = (
         "Ты — голосовой помощник робота. "
         "Опиши, что видно на фотографии, на русском языке. "
-        "Ответь простыми словами, максимум двумя предложениями. "
+        "Ответь простыми словами, коротко, максимум одним предложением. "
         "Не выдумывай детали, которых нельзя увидеть."
     )
 
@@ -87,8 +89,6 @@ def analyze_image(image_bytes):
                 error_text[:500]
             )
 
-            # Повторяем только временные ошибки сервера,
-            # перегрузку и ограничения частоты запросов.
             temporary = any(
                 marker in error_text
                 for marker in (
@@ -127,8 +127,6 @@ def vision():
             "error": "Нет фотографии. Отправьте файл в поле image."
         }), 400
 
-    # Принимаем JPEG, в том числе если устройство отправляет
-    # файл как application/octet-stream.
     content_type = (image.mimetype or "").lower()
     filename = (image.filename or "").lower()
 
@@ -153,7 +151,6 @@ def vision():
             "error": "Получена пустая фотография."
         }), 400
 
-    # Проверяем сигнатуру JPEG
     if not image_bytes.startswith(b"\xff\xd8\xff"):
         return jsonify({
             "status": "error",
@@ -161,69 +158,48 @@ def vision():
         }), 400
 
     try:
+        # 1. Получаем текст от Gemini
         answer = analyze_image(image_bytes)
+        logger.info("Image analyzed successfully; text: %s", answer)
 
-        logger.info(
-            "Image analyzed successfully; bytes=%d",
-            len(image_bytes)
+        # 2. Превращаем текст в аудио (MP3) с помощью gTTS
+        tts = gTTS(text=answer, lang='ru', slow=False)
+        audio_fp = io.BytesIO()
+        tts.write_to_fp(audio_fp)
+        audio_fp.seek(0)
+
+        # 3. Отправляем MP3 файл клиенту, а текст записываем в кастомный заголовок
+        response = send_file(
+            audio_fp,
+            mimetype="audio/mpeg",
+            as_attachment=True,
+            download_name="speech.mp3"
         )
-
-        return jsonify({
-            "status": "success",
-            "answer": answer,
-            "model": MODEL
-        })
+        
+        # Безопасно кодируем текст для хедера (заменяем не-latin1 символы)
+        safe_answer = answer.encode('utf-8', errors='ignore').decode('latin-1', errors='ignore')
+        response.headers["X-AI-Answer"] = safe_answer
+        return response
 
     except Exception as exc:
         error_text = str(exc)
         logger.exception("Image analysis failed")
 
-        # Сообщаем клиенту, если модель перегружена.
-        if any(
-            marker in error_text
-            for marker in ("503", "UNAVAILABLE")
-        ):
-            return jsonify({
-                "status": "error",
-                "error": (
-                    "Модель AI временно перегружена. "
-                    "Попробуйте позже."
-                )
-            }), 503
+        if any(marker in error_text for marker in ("503", "UNAVAILABLE")):
+            return jsonify({"status": "error", "error": "Модель AI временно перегружена."}), 503
 
-        if any(
-            marker in error_text
-            for marker in ("429", "RESOURCE_EXHAUSTED")
-        ):
-            return jsonify({
-                "status": "error",
-                "error": (
-                    "Превышен лимит запросов или квота AI. "
-                    "Проверьте ограничения API."
-                )
-            }), 429
+        if any(marker in error_text for marker in ("429", "RESOURCE_EXHAUSTED")):
+            return jsonify({"status": "error", "error": "Превышен лимит запросов AI."}), 429
 
-        return jsonify({
-            "status": "error",
-            "error": (
-                "Не удалось распознать изображение. "
-                "Проверьте логи Render."
-            )
-        }), 502
+        return jsonify({"status": "error", "error": "Внутренняя ошибка при обработке."}), 502
 
 
 @app.errorhandler(413)
 def too_large(error):
-    return jsonify({
-        "status": "error",
-        "error": "Фотография превышает лимит 5 МБ."
-    }), 413
+    return jsonify({"status": "error", "error": "Фотография превышает лимит 5 МБ."}), 413
 
 
 @app.errorhandler(500)
 def internal_error(error):
     logger.exception("Internal server error")
-    return jsonify({
-        "status": "error",
-        "error": "Внутренняя ошибка сервера."
-    }), 500
+    return jsonify({"status": "error", "error": "Внутренняя ошибка сервера."}), 500
