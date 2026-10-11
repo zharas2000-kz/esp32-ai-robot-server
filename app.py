@@ -1,10 +1,18 @@
 import os
+import logging
 from flask import Flask, request, jsonify
+from google import genai
+from google.genai import types
 
 app = Flask(__name__)
-
-# Максимальный размер фотографии — 5 МБ
 app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024
+
+logging.basicConfig(level=logging.INFO)
+
+API_KEY = os.environ.get("GEMINI_API_KEY")
+client = genai.Client(api_key=API_KEY) if API_KEY else None
+
+MODEL = "gemini-3.8-flash"
 
 
 @app.get("/")
@@ -12,22 +20,30 @@ def home():
     return jsonify({
         "status": "online",
         "server": "ESP32 AI Robot",
-        "message": "Сервер работает"
+        "ai": "Gemini"
     })
 
 
 @app.get("/health")
 def health():
-    return jsonify({"status": "ok"})
+    return jsonify({
+        "status": "ok",
+        "ai_key_configured": client is not None
+    })
 
 
 @app.post("/vision")
 def vision():
+    if client is None:
+        return jsonify({
+            "error": "GEMINI_API_KEY не настроен в Render"
+        }), 503
+
     image = request.files.get("image")
 
     if image is None:
         return jsonify({
-            "error": "Отправьте JPEG в поле image"
+            "error": "Отправьте фотографию в поле image"
         }), 400
 
     if image.mimetype not in ("image/jpeg", "image/jpg"):
@@ -38,21 +54,50 @@ def vision():
     image_bytes = image.read()
 
     if not image_bytes:
-        return jsonify({"error": "Пустое изображение"}), 400
+        return jsonify({"error": "Пустая фотография"}), 400
 
-    # Следующий этап: передать image_bytes в AI
-    return jsonify({
-        "status": "received",
-        "bytes": len(image_bytes),
-        "answer": "Фотография получена. AI-анализ пока не подключён."
-    })
+    try:
+        response = client.models.generate_content(
+            model=MODEL,
+            contents=[
+                types.Part.from_bytes(
+                    data=image_bytes,
+                    mime_type="image/jpeg"
+                ),
+                (
+                    "Опиши, что изображено на фотографии, "
+                    "на русском языке. Ответь понятно и коротко, "
+                    "одним или двумя предложениями, чтобы робот "
+                    "мог произнести ответ вслух. Не выдумывай "
+                    "детали, которых не видно."
+                )
+            ]
+        )
+
+        answer = (response.text or "").strip()
+
+        if not answer:
+            return jsonify({
+                "error": "AI не вернул текст"
+            }), 502
+
+        return jsonify({
+            "status": "success",
+            "answer": answer
+        })
+
+    except Exception:
+        logging.exception("Ошибка анализа изображения")
+        return jsonify({
+            "error": (
+                "Не удалось обработать фотографию. "
+                "Проверьте квоту, доступность модели и логи Render."
+            )
+        }), 502
 
 
 @app.errorhandler(413)
 def too_large(error):
-    return jsonify({"error": "Фотография больше 5 МБ"}), 413
-
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "10000"))
-    app.run(host="0.0.0.0", port=port)
+    return jsonify({
+        "error": "Размер фотографии превышает 5 МБ"
+    }), 413
