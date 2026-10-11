@@ -1,4 +1,5 @@
 import os
+import time
 import logging
 from flask import Flask, request, jsonify
 from google import genai
@@ -31,7 +32,37 @@ def health():
         "ai_key_configured": client is not None
     })
 
+def ask_gemini(image_bytes):
+    last_error = None
 
+    for attempt in range(3):
+        try:
+            return client.models.generate_content(
+                model=MODEL,
+                contents=[
+                    types.Part.from_bytes(
+                        data=image_bytes,
+                        mime_type="image/jpeg"
+                    ),
+                    (
+                        "Опиши изображение на русском языке. "
+                        "Ответь кратко, одним-двумя предложениями. "
+                        "Не выдумывай детали."
+                    )
+                ]
+            )
+        except Exception as e:
+            last_error = e
+            logging.warning(
+                "Попытка Gemini %s не удалась: %s",
+                attempt + 1, e
+            )
+
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+
+    raise last_error
+    
 @app.post("/vision")
 def vision():
     if client is None:
@@ -57,13 +88,7 @@ def vision():
         return jsonify({"error": "Пустая фотография"}), 400
 
     try:
-        response = client.models.generate_content(
-            model=MODEL,
-            contents=[
-                types.Part.from_bytes(
-                    data=image_bytes,
-                    mime_type="image/jpeg"
-                ),
+        response = ask_gemini(image_bytes),
                 (
                     "Опиши, что изображено на фотографии, "
                     "на русском языке. Ответь понятно и коротко, "
