@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 # Ключ задаётся в настройках Render -> Environment
 API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 
-# Изменено на лайт-версию по умолчанию
+# Модель по умолчанию
 MODEL = os.environ.get(
     "GEMINI_MODEL",
     "gemini-3.5-flash-lite"
@@ -26,7 +26,12 @@ MODEL = os.environ.get(
 
 client = genai.Client(api_key=API_KEY) if API_KEY else None
 
-# Глобальное хранилище для последнего сгенерированного аудиофайла (для сайта)
+# Глобальное хранилище для последнего состояния (текст + аудио) для сайта
+latest_guide_data = {
+    "status": "waiting",
+    "description": "Экспонат сипаттамасы осында шығады...",
+    "audio_available": False
+}
 latest_audio_data = None
 
 
@@ -119,7 +124,7 @@ def analyze_image(image_bytes):
 
 @app.post("/vision")
 def vision():
-    global latest_audio_data
+    global latest_audio_data, latest_guide_data
 
     if client is None:
         return jsonify({
@@ -166,18 +171,23 @@ def vision():
         }), 400
 
     try:
-        # 1. Получаем текст от лайт-модели Gemini на казахском языке
+        # 1. Получаем текст от Gemini
         answer = analyze_image(image_bytes)
         logger.info("Image analyzed successfully; text: %s", answer)
 
-        # 2. Превращаем текст в аудио (MP3) с помощью gTTS (язык 'kk' — казахский)
+        # 2. Превращаем текст в аудио (MP3) с помощью gTTS на русском языке
         tts = gTTS(text=answer, lang='ru', slow=False)
         audio_fp = io.BytesIO()
         tts.write_to_fp(audio_fp)
         audio_fp.seek(0)
 
-        # 3. Сохраняем байты аудио в глобальный буфер для сайта
+        # 3. Сохраняем байты аудио и текст для сайта
         latest_audio_data = audio_fp.read()
+        latest_guide_data = {
+            "status": "success",
+            "description": answer,
+            "audio_available": True
+        }
 
         return jsonify({
             "status": "success",
@@ -195,6 +205,12 @@ def vision():
             return jsonify({"status": "error", "error": "Превышен лимит запросов AI."}), 429
 
         return jsonify({"status": "error", "error": "Внутренняя ошибка при обработке."}), 502
+
+
+@app.get("/get-latest")
+def get_latest():
+    """Эндпоинт для сайта: возвращает статус и текст описания последнего экспоната."""
+    return jsonify(latest_guide_data), 200
 
 
 @app.get("/latest-audio")
