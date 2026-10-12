@@ -166,7 +166,7 @@ def vision():
         logger.info("Image analyzed successfully; text: %s", answer)
 
         # 2. Превращаем текст в аудио (MP3) с помощью gTTS
-        tts = gTTS(text=answer, lang='ru', slow=False)
+        tts = gTTS(text=answer, lang='kk', slow=False)
         audio_fp = io.BytesIO()
         tts.write_to_fp(audio_fp)
         audio_fp.seek(0)
