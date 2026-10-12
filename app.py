@@ -1,9 +1,8 @@
+import io
 import os
 import time
 import logging
-import io
-
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, Response
 from google import genai
 from google.genai import types
 from gtts import gTTS
@@ -16,23 +15,26 @@ app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Ключ задаётся в Render -> Environment
+# Ключ задаётся в настройках Render -> Environment
 API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 
-# Можно изменить модель в настройках Render
+# Изменено на лайт-версию по умолчанию
 MODEL = os.environ.get(
     "GEMINI_MODEL",
-    "gemini-3.5-flash-lite"
+    "gemini-2.5-flash-lite"
 ).strip()
 
 client = genai.Client(api_key=API_KEY) if API_KEY else None
+
+# Глобальное хранилище для последнего сгенерированного аудиофайла (для сайта)
+latest_audio_data = None
 
 
 @app.get("/")
 def home():
     return jsonify({
         "status": "online",
-        "server": "ESP32 AI Robot with Audio",
+        "server": "ESP32 AI Museum Robot Server",
         "ai": "Gemini",
         "model": MODEL
     })
@@ -54,7 +56,7 @@ def analyze_image(image_bytes):
         "Ты — аудио-гид и помощник для незрячего посетителя музея. "
         "Твоя задача — по присланной фотографии описать объект искусства или экспонат, перед которым находится пользователь. "
         "Правила ответа:\n"
-        "1. Пиши только на русском языке.\n"
+        "1. Пиши только на казахском языке.\n"
         "2. Говори кратко, емко и выразительно (так как текст будет озвучиваться в наушники), объемом не более 3-4 предложений.\n"
         "3. Сначала назови объект, затем опиши его визуальные и тактильные свойства: из чего он сделан (металл, дерево, ткань), форму, текстуру, размеры и цвета.\n"
         "4. Расскажи самую интересную историческую или культурную справку об этом экспонате.\n"
@@ -114,8 +116,11 @@ def analyze_image(image_bytes):
 
     raise last_error
 
+
 @app.post("/vision")
 def vision():
+    global latest_audio_data
+
     if client is None:
         return jsonify({
             "status": "error",
@@ -161,32 +166,27 @@ def vision():
         }), 400
 
     try:
-        # 1. Получаем текст от Gemini
+        # 1. Получаем текст от лайт-модели Gemini на казахском языке
         answer = analyze_image(image_bytes)
         logger.info("Image analyzed successfully; text: %s", answer)
 
-        # 2. Превращаем текст в аудио (MP3) с помощью gTTS
-        tts = gTTS(text=answer, lang='ru', slow=False)
+        # 2. Превращаем текст в аудио (MP3) с помощью gTTS (язык 'kk' — казахский)
+        tts = gTTS(text=answer, lang='kk', slow=False)
         audio_fp = io.BytesIO()
         tts.write_to_fp(audio_fp)
         audio_fp.seek(0)
 
-        # 3. Отправляем MP3 файл клиенту, а текст записываем в кастомный заголовок
-        response = send_file(
-            audio_fp,
-            mimetype="audio/mpeg",
-            as_attachment=True,
-            download_name="speech.mp3"
-        )
-        
-        # Безопасно кодируем текст для хедера (заменяем не-latin1 символы)
-        safe_answer = answer.encode('utf-8', errors='ignore').decode('latin-1', errors='ignore')
-        response.headers["X-AI-Answer"] = safe_answer
-        return response
+        # 3. Сохраняем байты аудио в глобальный буфер для сайта
+        latest_audio_data = audio_fp.read()
+
+        return jsonify({
+            "status": "success",
+            "text": answer
+        }), 200
 
     except Exception as exc:
-        error_text = str(exc)
         logger.exception("Image analysis failed")
+        error_text = str(exc)
 
         if any(marker in error_text for marker in ("503", "UNAVAILABLE")):
             return jsonify({"status": "error", "error": "Модель AI временно перегружена."}), 503
@@ -195,6 +195,16 @@ def vision():
             return jsonify({"status": "error", "error": "Превышен лимит запросов AI."}), 429
 
         return jsonify({"status": "error", "error": "Внутренняя ошибка при обработке."}), 502
+
+
+@app.get("/latest-audio")
+def latest_audio():
+    global latest_audio_data
+    if latest_audio_data is None:
+        return "", 404
+    
+    # Отдаем последний MP3-файл для сайта
+    return Response(latest_audio_data, mimetype="audio/mpeg")
 
 
 @app.errorhandler(413)
@@ -206,3 +216,7 @@ def too_large(error):
 def internal_error(error):
     logger.exception("Internal server error")
     return jsonify({"status": "error", "error": "Внутренняя ошибка сервера."}), 500
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)
