@@ -21,7 +21,7 @@ API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 # Изменено на лайт-версию по умолчанию
 MODEL = os.environ.get(
     "GEMINI_MODEL",
-    "gemini-2.5-flash-lite"
+    "gemini-3.5-flash-lite"
 ).strip()
 
 client = genai.Client(api_key=API_KEY) if API_KEY else None
